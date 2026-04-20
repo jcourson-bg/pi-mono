@@ -10,6 +10,13 @@ duplicate the READMEs; it is to explain why the code looks the way it does,
 what surprised me while reading it, and the rules the codebase seems to follow
 even when nobody wrote them down.
 
+## Read it
+
+- **[PDF](build/inside-pi-mono.pdf)** — clean typography, ~130 pages, A4.
+- **Markdown** — the TOC below links to each chapter.
+
+See [`build/README.md`](build/README.md) for how to rebuild the PDF.
+
 ## Table of contents
 
 ### Part I — Foundations

@@ -1,0 +1,4 @@
+node_modules/
+preview-*.png
+pdf-preview.png
+sanity-*.mjs
