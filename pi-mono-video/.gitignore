@@ -1,0 +1,12 @@
+node_modules
+dist
+.DS_Store
+.env
+
+# Per-frame sanity-check renders, not tracked.
+stills/
+
+# Intermediate render artifacts, but keep the final mp4.
+out/*.png
+out/*.webm
+out/*.mp3
