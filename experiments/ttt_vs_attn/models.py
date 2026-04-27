@@ -122,21 +122,26 @@ class GLAMixer(nn.Module):
 #    Inner LR η is a learnable scalar (positive via softplus).
 # ---------------------------------------------------------------------------
 class TTTLinearMixer(nn.Module):
+    """Memory is W ∈ R[H, Dh, Dh]; closed-form inner SGD step per token.
+
+    Adds an input-dependent per-head learning rate η_t = η_base · σ(W_lr x_t).
+    This lets the model learn to *not* update memory on tokens that shouldn't
+    be written (e.g. answer / query tokens), which is critical for MQAR.
+    """
+
     def __init__(self, d_model: int, n_heads: int = 4):
         super().__init__()
         self.d_model = d_model
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.lr_proj = nn.Linear(d_model, n_heads, bias=True)
         self.o = nn.Linear(d_model, d_model, bias=False)
-        # Per-head initial memory W_0, shared across batch.
         self.W0 = nn.Parameter(torch.zeros(n_heads, self.head_dim, self.head_dim))
-        # Start with a small inner LR; the model can grow it during outer training.
-        self.log_lr = nn.Parameter(torch.tensor(math.log(0.1)))
+        self.log_lr_base = nn.Parameter(torch.tensor(math.log(1.0)))
 
     @staticmethod
     def _norm(x: torch.Tensor) -> torch.Tensor:
-        # L2-normalize along the last dim; bounds inner-update magnitude.
         return x / (x.norm(dim=-1, keepdim=True) + 1e-6)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -144,20 +149,21 @@ class TTTLinearMixer(nn.Module):
         H, Dh = self.n_heads, self.head_dim
         qkv = self.qkv(x).view(B, T, 3, H, Dh)
         q, k, v = qkv.unbind(dim=2)
-        # Normalize keys / queries to unit length to keep ||W|| bounded.
         k = self._norm(k)
         q = self._norm(q)
-        eta = F.softplus(self.log_lr)
+        eta_base = F.softplus(self.log_lr_base)
+        eta_gate = torch.sigmoid(self.lr_proj(x))  # [B, T, H]
         W = self.W0.unsqueeze(0).expand(B, -1, -1, -1).contiguous()
         outs = []
         for t in range(T):
             kt = k[:, t]
             vt = v[:, t]
             qt = q[:, t]
+            eta_t = eta_base * eta_gate[:, t]  # [B, H]
             pred = torch.einsum("bhij,bhj->bhi", W, kt)
             err = pred - vt
             grad = torch.einsum("bhi,bhj->bhij", err, kt)
-            W = W - eta * grad
+            W = W - eta_t[..., None, None] * grad
             ot = torch.einsum("bhij,bhj->bhi", W, qt)
             outs.append(ot)
         out = torch.stack(outs, dim=1).reshape(B, T, D)
@@ -200,6 +206,8 @@ def _gelu_and_deriv(z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 class TTTMLPMixer(nn.Module):
+    """Memory is a 2-layer MLP. Same input-dependent η as TTT-Linear."""
+
     def __init__(self, d_model: int, n_heads: int = 4, hidden_mult: float = 1.0):
         super().__init__()
         self.d_model = d_model
@@ -207,11 +215,11 @@ class TTTMLPMixer(nn.Module):
         self.head_dim = d_model // n_heads
         self.hidden_dim = max(1, int(self.head_dim * hidden_mult))
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.lr_proj = nn.Linear(d_model, n_heads, bias=True)
         self.o = nn.Linear(d_model, d_model, bias=False)
-        # Initial inner-MLP weights, one set per head, shared across batch.
         self.W1_0 = nn.Parameter(torch.randn(n_heads, self.hidden_dim, self.head_dim) * 0.1)
         self.W2_0 = nn.Parameter(torch.randn(n_heads, self.head_dim, self.hidden_dim) * 0.1)
-        self.log_lr = nn.Parameter(torch.tensor(math.log(0.05)))
+        self.log_lr_base = nn.Parameter(torch.tensor(math.log(0.5)))
 
     @staticmethod
     def _norm(x: torch.Tensor) -> torch.Tensor:
@@ -224,33 +232,32 @@ class TTTMLPMixer(nn.Module):
         q, k, v = qkv.unbind(dim=2)
         k = self._norm(k)
         q = self._norm(q)
-        eta = F.softplus(self.log_lr)
+        eta_base = F.softplus(self.log_lr_base)
+        eta_gate = torch.sigmoid(self.lr_proj(x))  # [B, T, H]
 
-        W1 = self.W1_0.unsqueeze(0).expand(B, -1, -1, -1).contiguous()  # [B,H,Hh,Dh]
-        W2 = self.W2_0.unsqueeze(0).expand(B, -1, -1, -1).contiguous()  # [B,H,Dh,Hh]
+        W1 = self.W1_0.unsqueeze(0).expand(B, -1, -1, -1).contiguous()
+        W2 = self.W2_0.unsqueeze(0).expand(B, -1, -1, -1).contiguous()
 
         outs = []
         for t in range(T):
-            kt = k[:, t]  # [B,H,Dh]
+            kt = k[:, t]
             vt = v[:, t]
             qt = q[:, t]
-            # Forward through inner MLP on key.
-            z = torch.einsum("bhij,bhj->bhi", W1, kt)  # [B,H,Hh]
+            eta_t = eta_base * eta_gate[:, t]  # [B, H]
+            z = torch.einsum("bhij,bhj->bhi", W1, kt)
             a, sigma_p = _gelu_and_deriv(z)
-            y = torch.einsum("bhij,bhj->bhi", W2, a)  # [B,H,Dh]
+            y = torch.einsum("bhij,bhj->bhi", W2, a)
             err = y - vt
-            # Manual grads.
-            dW2 = torch.einsum("bhi,bhj->bhij", err, a)  # [B,H,Dh,Hh]
-            da = torch.einsum("bhij,bhi->bhj", W2, err)  # [B,H,Hh]
+            dW2 = torch.einsum("bhi,bhj->bhij", err, a)
+            da = torch.einsum("bhij,bhi->bhj", W2, err)
             dz = da * sigma_p
-            dW1 = torch.einsum("bhi,bhj->bhij", dz, kt)  # [B,H,Hh,Dh]
-            # SGD step.
-            W1 = W1 - eta * dW1
-            W2 = W2 - eta * dW2
-            # Output: forward with q on updated weights.
+            dW1 = torch.einsum("bhi,bhj->bhij", dz, kt)
+            scale = eta_t[..., None, None]
+            W1 = W1 - scale * dW1
+            W2 = W2 - scale * dW2
             zq = torch.einsum("bhij,bhj->bhi", W1, qt)
             aq, _ = _gelu_and_deriv(zq)
-            ot = torch.einsum("bhij,bhj->bhi", W2, aq)  # [B,H,Dh]
+            ot = torch.einsum("bhij,bhj->bhi", W2, aq)
             outs.append(ot)
         out = torch.stack(outs, dim=1).reshape(B, T, D)
         return self.o(out)
@@ -278,16 +285,26 @@ class _Block(nn.Module):
 
 
 class TinyLM(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int, blocks: list[nn.Module]):
+    """Tiny LM with learned absolute position embeddings shared by all mixers.
+
+    Attention additionally uses RoPE inside its mixer. SSM/TTT mixers rely
+    solely on this absolute positional signal in the input.
+    """
+
+    def __init__(self, vocab_size: int, d_model: int, blocks: list[nn.Module],
+                 max_len: int = 256):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_model)
+        self.pos = nn.Embedding(max_len, d_model)
         self.blocks = nn.ModuleList(blocks)
         self.out_norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
         self.head.weight = self.embed.weight  # tied
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.embed(x)
+        T = x.size(1)
+        pos = torch.arange(T, device=x.device)
+        h = self.embed(x) + self.pos(pos)[None, :, :]
         for blk in self.blocks:
             h = blk(h)
         return self.head(self.out_norm(h))
