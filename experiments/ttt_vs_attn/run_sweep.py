@@ -17,12 +17,14 @@ from train import train_one
 
 
 REGIMES = [
-    # (label, N kv pairs, M queries, training steps)
-    ("easy",   8,  8,  600),
-    ("medium", 16, 8,  900),
-    ("hard",   32, 8,  1500),
-    ("xhard",  64, 8,  2200),
+    # (label, N kv pairs, M queries, num_keys, num_values, training steps)
+    # MQAR difficulty rises with N and with the value-vocab size.
+    ("easy",    4,  4,  16, 16, 1500),
+    ("medium",  8,  8,  32, 32, 3000),
+    ("hard",   16,  8,  64, 64, 4000),
 ]
+# TTT-MLP is ~3x slower than attention; cap its budget per regime.
+STEPS_OVERRIDE = {"ttt_mlp": {"easy": 1200, "medium": 2200, "hard": 3000}}
 MODELS = ["attn", "gla", "ttt_linear", "ttt_mlp"]
 
 
@@ -38,17 +40,20 @@ def main(seeds: list[int], outdir: Path, regime_filter: list[str] | None,
                          "params", "steps", "final_loss", "final_acc",
                          "wall_seconds"])
         for regime in REGIMES:
-            label, N, M, steps = regime
+            label, N, M, NK, NV, steps_default = regime
             if regime_filter and label not in regime_filter:
                 continue
             for model in MODELS:
                 if model_filter and model not in model_filter:
                     continue
+                steps = STEPS_OVERRIDE.get(model, {}).get(label, steps_default)
                 for seed in seeds:
-                    print(f"\n=== regime={label}  model={model}  seed={seed} ===")
+                    print(f"\n=== regime={label}  model={model}  seed={seed}  "
+                          f"N={N} NK={NK} NV={NV} steps={steps} ===")
                     t0 = time.time()
-                    res = train_one(model, N, M, steps=steps,
-                                    batch_size=batch_size, lr=lr, seed=seed)
+                    res = train_one(model, N, M, num_keys=NK, num_values=NV,
+                                    steps=steps, batch_size=batch_size,
+                                    lr=lr, seed=seed)
                     dt = time.time() - t0
                     res["regime"] = label
                     res["seed"] = seed
