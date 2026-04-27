@@ -54,7 +54,8 @@ Single seed, single-CPU, parameter-matched at `d_model=64`:
 not informative on its own.
 
 We confirmed the TTT-Linear medium failure with a second seed
-(seed=1, same hyperparameters): `<filled-in-after-run>%`.
+(seed=1, same hyperparameters): final accuracy **17.97%** at step
+4500. Both seeds plateau in `[15%, 19%]` for the entire training run.
 
 We also extended TTT-Linear at `medium` to **8000 steps**, well past the
 point where attention's grokking event has already happened (~step 2000).
