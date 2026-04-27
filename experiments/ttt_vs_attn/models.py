@@ -218,11 +218,11 @@ class TTTMLPMixer(nn.Module):
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.lr_proj = nn.Linear(d_model, n_heads, bias=True)
         self.o = nn.Linear(d_model, d_model, bias=False)
-        # Smaller init + smaller default LR keep the inner dynamics stable until
-        # the outer optimizer has chance to reshape the qkv projections.
+        # Init small. After v is L2-normalized, an inner LR around 0.3 is
+        # needed for the inner update to actually make progress per step.
         self.W1_0 = nn.Parameter(torch.randn(n_heads, self.hidden_dim, self.head_dim) * 0.02)
         self.W2_0 = nn.Parameter(torch.randn(n_heads, self.head_dim, self.hidden_dim) * 0.02)
-        self.log_lr_base = nn.Parameter(torch.tensor(math.log(0.05)))
+        self.log_lr_base = nn.Parameter(torch.tensor(math.log(0.3)))
 
     @staticmethod
     def _norm(x: torch.Tensor) -> torch.Tensor:
