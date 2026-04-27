@@ -151,6 +151,7 @@ class TTTLinearMixer(nn.Module):
         q, k, v = qkv.unbind(dim=2)
         k = self._norm(k)
         q = self._norm(q)
+        v = self._norm(v)  # bound the inner-update magnitude end-to-end
         eta_base = F.softplus(self.log_lr_base)
         eta_gate = torch.sigmoid(self.lr_proj(x))  # [B, T, H]
         W = self.W0.unsqueeze(0).expand(B, -1, -1, -1).contiguous()
@@ -217,9 +218,11 @@ class TTTMLPMixer(nn.Module):
         self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
         self.lr_proj = nn.Linear(d_model, n_heads, bias=True)
         self.o = nn.Linear(d_model, d_model, bias=False)
-        self.W1_0 = nn.Parameter(torch.randn(n_heads, self.hidden_dim, self.head_dim) * 0.1)
-        self.W2_0 = nn.Parameter(torch.randn(n_heads, self.head_dim, self.hidden_dim) * 0.1)
-        self.log_lr_base = nn.Parameter(torch.tensor(math.log(0.5)))
+        # Smaller init + smaller default LR keep the inner dynamics stable until
+        # the outer optimizer has chance to reshape the qkv projections.
+        self.W1_0 = nn.Parameter(torch.randn(n_heads, self.hidden_dim, self.head_dim) * 0.02)
+        self.W2_0 = nn.Parameter(torch.randn(n_heads, self.head_dim, self.hidden_dim) * 0.02)
+        self.log_lr_base = nn.Parameter(torch.tensor(math.log(0.05)))
 
     @staticmethod
     def _norm(x: torch.Tensor) -> torch.Tensor:
@@ -232,6 +235,7 @@ class TTTMLPMixer(nn.Module):
         q, k, v = qkv.unbind(dim=2)
         k = self._norm(k)
         q = self._norm(q)
+        v = self._norm(v)  # bound the inner-update magnitude end-to-end
         eta_base = F.softplus(self.log_lr_base)
         eta_gate = torch.sigmoid(self.lr_proj(x))  # [B, T, H]
 
