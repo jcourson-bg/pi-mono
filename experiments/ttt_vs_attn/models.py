@@ -91,9 +91,13 @@ class GLAMixer(nn.Module):
         H, Dh = self.n_heads, self.head_dim
         qkv = self.qkv(x).view(B, T, 3, H, Dh)
         q, k, v = qkv.unbind(dim=2)
-        # Apply softplus to keys to keep them positive (linear-attention trick).
-        k = F.elu(k) + 1.0
-        q = F.elu(q) + 1.0
+        # RoPE on q/k so this mixer has positional info too.
+        cos, sin = _rope_cache(T, Dh, x.device, x.dtype)
+        qh = _apply_rope(q.transpose(1, 2), cos, sin).transpose(1, 2)
+        kh = _apply_rope(k.transpose(1, 2), cos, sin).transpose(1, 2)
+        # Apply elu+1 to keys/queries to keep them positive (linear-attention trick).
+        k = F.elu(kh) + 1.0
+        q = F.elu(qh) + 1.0
         gate = torch.sigmoid(self.gate(x)).view(B, T, H, Dh)  # [B,T,H,Dh]
 
         # State: [B, H, Dh, Dh]. Loop over T (CPU friendly at small T).
@@ -149,6 +153,9 @@ class TTTLinearMixer(nn.Module):
         H, Dh = self.n_heads, self.head_dim
         qkv = self.qkv(x).view(B, T, 3, H, Dh)
         q, k, v = qkv.unbind(dim=2)
+        cos, sin = _rope_cache(T, Dh, x.device, x.dtype)
+        q = _apply_rope(q.transpose(1, 2), cos, sin).transpose(1, 2)
+        k = _apply_rope(k.transpose(1, 2), cos, sin).transpose(1, 2)
         k = self._norm(k)
         q = self._norm(q)
         v = self._norm(v)  # bound the inner-update magnitude end-to-end
@@ -233,6 +240,9 @@ class TTTMLPMixer(nn.Module):
         H, Dh, Hh = self.n_heads, self.head_dim, self.hidden_dim
         qkv = self.qkv(x).view(B, T, 3, H, Dh)
         q, k, v = qkv.unbind(dim=2)
+        cos, sin = _rope_cache(T, Dh, x.device, x.dtype)
+        q = _apply_rope(q.transpose(1, 2), cos, sin).transpose(1, 2)
+        k = _apply_rope(k.transpose(1, 2), cos, sin).transpose(1, 2)
         k = self._norm(k)
         q = self._norm(q)
         v = self._norm(v)  # bound the inner-update magnitude end-to-end
@@ -289,26 +299,21 @@ class _Block(nn.Module):
 
 
 class TinyLM(nn.Module):
-    """Tiny LM with learned absolute position embeddings shared by all mixers.
-
-    Attention additionally uses RoPE inside its mixer. SSM/TTT mixers rely
-    solely on this absolute positional signal in the input.
+    """Tiny LM. Position info is supplied per-mixer (RoPE for all of them)
+    rather than via input-level absolute embeddings, which empirically
+    interfered with the head when weights are tied to the embedding.
     """
 
-    def __init__(self, vocab_size: int, d_model: int, blocks: list[nn.Module],
-                 max_len: int = 256):
+    def __init__(self, vocab_size: int, d_model: int, blocks: list[nn.Module]):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, d_model)
-        self.pos = nn.Embedding(max_len, d_model)
         self.blocks = nn.ModuleList(blocks)
         self.out_norm = nn.LayerNorm(d_model)
         self.head = nn.Linear(d_model, vocab_size, bias=False)
         self.head.weight = self.embed.weight  # tied
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        T = x.size(1)
-        pos = torch.arange(T, device=x.device)
-        h = self.embed(x) + self.pos(pos)[None, :, :]
+        h = self.embed(x)
         for blk in self.blocks:
             h = blk(h)
         return self.head(self.out_norm(h))
