@@ -18,14 +18,17 @@ from train import train_one
 
 REGIMES = [
     # (label, N kv pairs, M queries, num_keys, num_values, training steps)
-    # MQAR difficulty rises with N and with the value-vocab size.
-    ("easy",    4,  4,  16, 16, 1500),
-    ("medium",  8,  8,  32, 32, 3000),
-    ("hard",   16,  8,  64, 64, 4000),
+    # Calibration showed an induction-head-style grokking transition around
+    # step ~2000; budgets are sized to land well past it.
+    ("easy",    4,  4,  16, 16, 3000),
+    ("medium",  8,  8,  32, 32, 4500),
+    ("hard",   16,  8,  64, 64, 6000),
 ]
-# TTT-MLP is ~3x slower than attention; cap its budget per regime.
-STEPS_OVERRIDE = {"ttt_mlp": {"easy": 1200, "medium": 2200, "hard": 3000}}
-MODELS = ["attn", "gla", "ttt_linear", "ttt_mlp"]
+STEPS_OVERRIDE: dict[str, dict[str, int]] = {}
+# TTT-MLP did not converge in our 1-inner-step / single-CPU setup; the
+# original paper uses multi-step / chunked inner updates. We exclude it
+# from the headline sweep but leave it implemented for future runs.
+MODELS = ["attn", "gla", "ttt_linear"]
 
 
 def main(seeds: list[int], outdir: Path, regime_filter: list[str] | None,
