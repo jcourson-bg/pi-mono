@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Luma Video → 3D</title>
+	<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
+	<style>
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+			background: #0c0c10;
+			color: #e8e8ee;
+			min-height: 100vh;
+		}
+		main {
+			max-width: 880px;
+			margin: 0 auto;
+			padding: 32px 20px 80px;
+		}
+		h1 { margin: 0 0 6px; font-size: 22px; font-weight: 600; }
+		p.lede { margin: 0 0 24px; color: #9aa0aa; font-size: 14px; }
+		.card {
+			background: #15161c;
+			border: 1px solid #23252e;
+			border-radius: 10px;
+			padding: 20px;
+			margin-bottom: 16px;
+		}
+		label { display: block; font-size: 12px; color: #9aa0aa; margin-bottom: 6px; }
+		input[type=text], select {
+			width: 100%;
+			padding: 9px 11px;
+			background: #0c0c10;
+			border: 1px solid #2b2d38;
+			border-radius: 6px;
+			color: #e8e8ee;
+			font: inherit;
+		}
+		input[type=file] {
+			width: 100%;
+			padding: 18px;
+			background: #0c0c10;
+			border: 1px dashed #2b2d38;
+			border-radius: 6px;
+			color: #9aa0aa;
+		}
+		.row { display: grid; grid-template-columns: 2fr 1fr; gap: 12px; margin-bottom: 12px; }
+		button {
+			background: #4f7df3;
+			color: white;
+			border: 0;
+			padding: 10px 18px;
+			border-radius: 6px;
+			font: inherit;
+			font-weight: 500;
+			cursor: pointer;
+		}
+		button:disabled { opacity: 0.5; cursor: not-allowed; }
+		pre.log {
+			background: #08090c;
+			border: 1px solid #23252e;
+			border-radius: 6px;
+			padding: 12px;
+			font-size: 12px;
+			max-height: 240px;
+			overflow: auto;
+			white-space: pre-wrap;
+			word-break: break-word;
+			color: #c8c8d2;
+		}
+		progress { width: 100%; height: 8px; }
+		model-viewer {
+			width: 100%;
+			height: 480px;
+			background: #08090c;
+			border: 1px solid #23252e;
+			border-radius: 6px;
+			--poster-color: transparent;
+		}
+		a { color: #8aa9ff; }
+		.muted { color: #6a6f7c; font-size: 12px; }
+		.artifacts a { display: inline-block; margin-right: 12px; }
+	</style>
+</head>
+<body>
+<main>
+	<h1>Luma Video → 3D</h1>
+	<p class="lede">Upload a walk-around video. The server uses your <code>LUMA_API_KEY</code> to submit it to Luma's capture API and polls for the result.</p>
+
+	<div class="card">
+		<div class="row">
+			<div>
+				<label for="title">Title</label>
+				<input id="title" type="text" value="pottery test" />
+			</div>
+			<div>
+				<label for="camModel">Camera</label>
+				<select id="camModel">
+					<option value="normal" selected>normal</option>
+					<option value="fisheye">fisheye</option>
+					<option value="equirectangular">equirectangular (360)</option>
+				</select>
+			</div>
+		</div>
+		<label for="file">Video file</label>
+		<input id="file" type="file" accept="video/*" />
+		<div style="margin-top:14px; display:flex; gap:10px; align-items:center;">
+			<button id="go">Submit to Luma</button>
+			<span id="status" class="muted">idle</span>
+		</div>
+	</div>
+
+	<div class="card">
+		<label>Progress</label>
+		<progress id="progress" value="0" max="100"></progress>
+		<div id="stage" class="muted" style="margin-top:6px;">—</div>
+		<div class="artifacts" id="artifacts" style="margin-top:10px;"></div>
+	</div>
+
+	<div class="card">
+		<label>3D viewer</label>
+		<model-viewer id="viewer" camera-controls auto-rotate ar shadow-intensity="1"></model-viewer>
+		<div class="muted" style="margin-top:6px;">Loads the first GLTF/GLB artifact Luma returns. Drag to rotate, scroll to zoom.</div>
+	</div>
+
+	<div class="card">
+		<label>Log</label>
+		<pre id="log" class="log"></pre>
+	</div>
+</main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const log = (...args) => {
+	const line = args.map((a) => (typeof a === "string" ? a : JSON.stringify(a, null, 2))).join(" ");
+	$("log").textContent += line + "\n";
+	$("log").scrollTop = $("log").scrollHeight;
+};
+const setStatus = (s) => ($("status").textContent = s);
+
+async function jsonReq(url, init) {
+	const r = await fetch(url, init);
+	const text = await r.text();
+	let data;
+	try { data = JSON.parse(text); } catch { data = { raw: text }; }
+	if (!r.ok) throw new Error(`${url} ${r.status}: ${text}`);
+	return data;
+}
+
+$("go").addEventListener("click", async () => {
+	const file = $("file").files[0];
+	if (!file) return alert("pick a video first");
+	$("go").disabled = true;
+	$("artifacts").textContent = "";
+	$("progress").value = 0;
+	$("stage").textContent = "—";
+
+	try {
+		setStatus("creating capture…");
+		const start = await jsonReq("/api/start", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ title: $("title").value || "untitled", camModel: $("camModel").value }),
+		});
+		log("created", { slug: start.slug });
+		if (!start.uploadUrl) throw new Error("no signed upload URL returned");
+
+		setStatus("uploading video to Luma…");
+		const upload = await fetch(start.uploadUrl, {
+			method: "PUT",
+			headers: { "Content-Type": "text/plain" },
+			body: file,
+		});
+		if (!upload.ok) throw new Error(`upload failed ${upload.status}: ${await upload.text()}`);
+		log("uploaded", { bytes: file.size });
+
+		setStatus("triggering reconstruction…");
+		await jsonReq(`/api/trigger?slug=${encodeURIComponent(start.slug)}`, { method: "POST" });
+		log("triggered");
+
+		setStatus("processing (this can take ~30 min)…");
+		while (true) {
+			await new Promise((r) => setTimeout(r, 8000));
+			const s = await jsonReq(`/api/status?slug=${encodeURIComponent(start.slug)}`);
+			const run = s.latestRun ?? s.runs?.[s.runs.length - 1] ?? {};
+			const progress = run.progress ?? s.progress ?? 0;
+			const stage = run.currentStage ?? s.currentStage ?? run.status ?? s.status ?? "?";
+			$("progress").value = Number(progress) || 0;
+			$("stage").textContent = `${stage} — ${progress}%`;
+			log("status", { stage, progress });
+			const artifacts = run.artifacts ?? s.artifacts ?? [];
+			if (artifacts.length) {
+				$("artifacts").innerHTML = artifacts
+					.map((a) => `<a href="${a.url}" target="_blank">${a.type}</a>`)
+					.join("");
+				const gltf = artifacts.find((a) => /gltf|glb/i.test(a.type ?? ""))?.url
+					?? artifacts.find((a) => /\.glb|\.gltf/i.test(a.url ?? ""))?.url;
+				if (gltf) {
+					$("viewer").src = gltf;
+					setStatus("done");
+					log("loaded into viewer", gltf);
+					break;
+				}
+			}
+			const status = (run.status ?? s.status ?? "").toLowerCase();
+			if (status === "failed" || status === "error") {
+				setStatus("failed");
+				break;
+			}
+			if (status === "finished" || status === "complete" || progress >= 100) {
+				setStatus("done (no GLTF artifact found)");
+				break;
+			}
+		}
+	} catch (err) {
+		setStatus("error");
+		log("ERROR", String(err.message ?? err));
+	} finally {
+		$("go").disabled = false;
+	}
+});
+</script>
+</body>
+</html>
